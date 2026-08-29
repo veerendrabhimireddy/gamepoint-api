@@ -25,7 +25,7 @@ import os
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 
 app = FastAPI(
     title="GamePoint Voice-Agent API",
@@ -162,8 +162,68 @@ def _summarize_sports(data: list) -> dict:
     return sports
 
 
+def VenueId(venue_id: str = Query(..., description="Venue ID, e.g. 1")) -> int:
+    """Accept venue_id as a loose string and coerce it to a known venue.
+
+    The voice platform sends everything as text, sometimes padded, quoted, or
+    as a centre name. Anything unusable returns a 400 with a clear message
+    instead of FastAPI's opaque 422.
+    """
+    raw = str(venue_id).strip().strip('"').strip("'").strip()
+    if not raw or raw.startswith("{"):
+        raise HTTPException(
+            status_code=400,
+            detail="venue_id is missing. Send a numeric centre ID, e.g. venue_id=1.",
+        )
+    try:
+        vid = int(float(raw))
+    except ValueError:
+        # allow a centre name instead of an ID
+        for k, name in VENUES.items():
+            if name.lower() == raw.lower():
+                return k
+        raise HTTPException(
+            status_code=400,
+            detail=f"venue_id '{raw}' is not valid. Use a numeric centre ID, e.g. 1 for Hitec.",
+        )
+    if vid not in VENUES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"venue_id {vid} is not a known centre. Valid IDs: {sorted(VENUES)}",
+        )
+    return vid
+
+
+def _opt_int(value: Optional[str], field: str) -> Optional[int]:
+    """Coerce an optional loose string to int. Blank/placeholder -> None."""
+    if value is None:
+        return None
+    raw = str(value).strip().strip('"').strip("'").strip()
+    if not raw or raw.startswith("{") or raw.lower() in ("null", "none", "na"):
+        return None
+    try:
+        return int(float(raw))
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail=f"{field} '{raw}' is not a number."
+        )
+
+
+def _norm_user_type(user_type: str) -> str:
+    """Normalise child/adult, tolerating case, padding and common synonyms."""
+    ut = str(user_type).strip().strip('"').strip("'").lower()
+    if ut in ("child", "kid", "kids", "children", "junior"):
+        return "child"
+    if ut in ("adult", "adults", "senior"):
+        return "adult"
+    raise HTTPException(
+        status_code=400,
+        detail=f"user_type '{user_type}' is not valid. Use 'child' or 'adult'.",
+    )
+
+
 def _rows_for(data: list, sport: str, user_type: str) -> list:
-    sport_l = sport.strip().lower()
+    sport_l = sport.strip().strip('"').strip("'").lower()
     ut_l = user_type.strip().lower()
     out = []
     for row in data:
@@ -189,7 +249,7 @@ async def venues():
 
 
 @app.get("/coaching/overview")
-async def coaching_overview(venue_id: int = Query(..., description="Venue ID")):
+async def coaching_overview(venue_id: int = Depends(VenueId)):
     """What coaching is offered at a venue: sports, user types, valid days/week."""
     payload = await _fetch_coaching(venue_id)
     data = payload.get("data", [])
@@ -214,7 +274,7 @@ async def coaching_overview(venue_id: int = Query(..., description="Venue ID")):
 
 @app.get("/coaching/availability")
 async def coaching_availability(
-    venue_id: int = Query(...),
+    venue_id: int = Depends(VenueId),
     sport: str = Query(...),
     user_type: str = Query(..., description="child or adult"),
     period: Optional[str] = Query(None, description="Optional: morning or evening"),
@@ -222,6 +282,7 @@ async def coaching_availability(
     """Availability ONLY (no pricing) for one sport + age group at one centre:
     the batch slots and valid days-per-week. Fees come from /coaching/pricing."""
     payload = await _fetch_coaching(venue_id)
+    user_type = _norm_user_type(user_type)
     rows = _rows_for(payload.get("data", []), sport, user_type)
     if not rows:
         raise HTTPException(
@@ -274,7 +335,7 @@ async def coaching_availability(
 
 @app.get("/coaching/details")
 async def coaching_details(
-    venue_id: int = Query(...),
+    venue_id: int = Depends(VenueId),
     sport: str = Query(..., description="e.g. Badminton"),
     user_type: Optional[str] = Query(None, description="Optional: child or adult"),
 ):
@@ -374,15 +435,17 @@ async def coaching_details(
 
 @app.get("/coaching/timings")
 async def coaching_timings(
-    venue_id: int = Query(...),
+    venue_id: int = Depends(VenueId),
     sport: str = Query(...),
     user_type: str = Query(..., description="child or adult"),
-    days_per_week: Optional[int] = Query(None, description="2, 3, 5, or 6"),
+    days_per_week: Optional[str] = Query(None, description="2, 3, 5, or 6"),
     period: Optional[str] = Query(None, description="morning or evening"),
 ):
     """Matching batch time slots only. Sorted so the recommended slot is first
     (morning -> closest to 7 AM, evening -> closest to 4:30 PM)."""
     payload = await _fetch_coaching(venue_id)
+    user_type = _norm_user_type(user_type)
+    days_per_week = _opt_int(days_per_week, "days_per_week")
     rows = _rows_for(payload.get("data", []), sport, user_type)
 
     slots = []
@@ -437,16 +500,19 @@ async def coaching_timings(
 
 @app.get("/coaching/pricing")
 async def coaching_pricing(
-    venue_id: int = Query(...),
+    venue_id: int = Depends(VenueId),
     sport: str = Query(...),
     user_type: str = Query(..., description="child or adult"),
-    days_per_week: Optional[int] = Query(None, description="2, 3, 5, or 6"),
-    duration: Optional[int] = Query(None, description="Plan length in DAYS (30,45,90,105,180,195)"),
+    days_per_week: Optional[str] = Query(None, description="2, 3, 5, or 6"),
+    duration: Optional[str] = Query(None, description="Plan length in DAYS (30,45,90,105,180,195)"),
     months: Optional[str] = Query(None, description="Plan length in MONTHS (1,1.5,3,3.5,6,6.5) - converted to days"),
 ):
     """Exact fee for a plan. If duration/months omitted, returns the full range
     for the sport/user_type (optionally filtered to days_per_week)."""
     payload = await _fetch_coaching(venue_id)
+    user_type = _norm_user_type(user_type)
+    days_per_week = _opt_int(days_per_week, "days_per_week")
+    duration = _opt_int(duration, "duration")
     rows = _rows_for(payload.get("data", []), sport, user_type)
 
     if not rows:
@@ -590,21 +656,21 @@ async def sports_all():
 
 
 @app.get("/membership")
-async def membership(venue_id: int = Query(...)):
+async def membership(venue_id: int = Depends(VenueId)):
     return await _fetch(
         "pricing-offers-data-external/", {"tab": "membership", "venue_id": venue_id}
     )
 
 
 @app.get("/bnp")
-async def bnp(venue_id: int = Query(...)):
+async def bnp(venue_id: int = Depends(VenueId)):
     return await _fetch(
         "pricing-offers-data-external/", {"tab": "bnp_pricing", "venue_id": venue_id}
     )
 
 
 @app.get("/offers")
-async def offers(venue_id: int = Query(...)):
+async def offers(venue_id: int = Depends(VenueId)):
     return await _fetch(
         "pricing-offers-active-external/", {"venue_id": venue_id}
     )
