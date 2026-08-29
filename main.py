@@ -25,7 +25,7 @@ import os
 from typing import Optional
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 
 app = FastAPI(
     title="GamePoint Voice-Agent API",
@@ -162,6 +162,71 @@ def _summarize_sports(data: list) -> dict:
     return sports
 
 
+async def _args(request: Request) -> dict:
+    """Merge query-string params with a JSON body.
+
+    Some voice platforms drop the query string entirely and send tool
+    properties as a JSON body, even on a GET. Reading both means one static
+    URL works either way. Query params win when both are present.
+    """
+    merged: dict = {}
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            # tolerate a platform that nests the values one level down
+            for key in ("body", "data", "arguments", "parameters", "properties"):
+                inner = body.get(key)
+                if isinstance(inner, dict):
+                    merged.update(inner)
+            merged.update({k: v for k, v in body.items() if not isinstance(v, dict)})
+    except Exception:
+        pass  # no body, empty body, or not JSON — query params only
+    merged.update(dict(request.query_params))
+    return merged
+
+
+def _clean_opt(value) -> Optional[str]:
+    """Trim a loose value; blank / placeholder / null-ish becomes None."""
+    if value is None:
+        return None
+    raw = str(value).strip().strip('"').strip("'").strip()
+    if not raw or raw.startswith("{") or raw.lower() in ("null", "none", "na", "undefined"):
+        return None
+    return raw
+
+
+def _require_str(value, field: str) -> str:
+    cleaned = _clean_opt(value)
+    if cleaned is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{field}' is required but was not received. "
+            f"Send it as a query parameter or in the JSON body.",
+        )
+    return cleaned
+
+
+def _resolve_venue(value) -> int:
+    """Coerce a loose venue value (id or centre name) to a known venue id."""
+    raw = _require_str(value, "venue_id")
+    try:
+        vid = int(float(raw))
+    except ValueError:
+        for k, name in VENUES.items():
+            if name.lower() == raw.lower():
+                return k
+        raise HTTPException(
+            status_code=400,
+            detail=f"venue_id '{raw}' is not valid. Use a numeric centre ID, e.g. 1 for Hitec.",
+        )
+    if vid not in VENUES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"venue_id {vid} is not a known centre. Valid IDs: {sorted(VENUES)}",
+        )
+    return vid
+
+
 def VenueId(venue_id: str = Query(..., description="Venue ID, e.g. 1")) -> int:
     """Accept venue_id as a loose string and coerce it to a known venue.
 
@@ -273,16 +338,21 @@ async def coaching_overview(venue_id: int = Depends(VenueId)):
 
 
 @app.get("/coaching/availability")
-async def coaching_availability(
-    venue_id: int = Depends(VenueId),
-    sport: str = Query(...),
-    user_type: str = Query(..., description="child or adult"),
-    period: Optional[str] = Query(None, description="Optional: morning or evening"),
-):
+@app.post("/coaching/availability")
+async def coaching_availability(request: Request):
     """Availability ONLY (no pricing) for one sport + age group at one centre:
-    the batch slots and valid days-per-week. Fees come from /coaching/pricing."""
+    the batch slots and valid days-per-week. Fees come from /coaching/pricing.
+
+    Accepts its inputs from the query string OR a JSON body, because some voice
+    platforms send tool properties in the body even for a GET.
+    """
+    args = await _args(request)
+    venue_id = _resolve_venue(args.get("venue_id"))
+    sport = _require_str(args.get("sport"), "sport")
+    user_type = _norm_user_type(_require_str(args.get("user_type"), "user_type"))
+    period = _clean_opt(args.get("period"))
+
     payload = await _fetch_coaching(venue_id)
-    user_type = _norm_user_type(user_type)
     rows = _rows_for(payload.get("data", []), sport, user_type)
     if not rows:
         raise HTTPException(
@@ -499,20 +569,22 @@ async def coaching_timings(
 
 
 @app.get("/coaching/pricing")
-async def coaching_pricing(
-    venue_id: int = Depends(VenueId),
-    sport: str = Query(...),
-    user_type: str = Query(..., description="child or adult"),
-    days_per_week: Optional[str] = Query(None, description="2, 3, 5, or 6"),
-    duration: Optional[str] = Query(None, description="Plan length in DAYS (30,45,90,105,180,195)"),
-    months: Optional[str] = Query(None, description="Plan length in MONTHS (1,1.5,3,3.5,6,6.5) - converted to days"),
-):
+@app.post("/coaching/pricing")
+async def coaching_pricing(request: Request):
     """Exact fee for a plan. If duration/months omitted, returns the full range
-    for the sport/user_type (optionally filtered to days_per_week)."""
+    for the sport/user_type (optionally filtered to days_per_week).
+
+    Accepts inputs from the query string OR a JSON body.
+    """
+    args = await _args(request)
+    venue_id = _resolve_venue(args.get("venue_id"))
+    sport = _require_str(args.get("sport"), "sport")
+    user_type = _norm_user_type(_require_str(args.get("user_type"), "user_type"))
+    days_per_week = _opt_int(args.get("days_per_week"), "days_per_week")
+    duration = _opt_int(args.get("duration"), "duration")
+    months = _clean_opt(args.get("months"))
+
     payload = await _fetch_coaching(venue_id)
-    user_type = _norm_user_type(user_type)
-    days_per_week = _opt_int(days_per_week, "days_per_week")
-    duration = _opt_int(duration, "duration")
     rows = _rows_for(payload.get("data", []), sport, user_type)
 
     if not rows:
@@ -600,13 +672,18 @@ async def _all_venue_sports() -> list[tuple[int, dict]]:
 
 
 @app.get("/sports/centers")
-async def sports_centers(
-    sport: str = Query(..., description="e.g. Football, Badminton"),
-    user_type: Optional[str] = Query(None, description="Optional: child or adult"),
-):
-    """Which centres offer a given sport (live sweep across all venues)."""
-    sport_l = sport.strip().lower()
-    ut_l = user_type.strip().lower() if user_type else None
+@app.post("/sports/centers")
+async def sports_centers(request: Request):
+    """Which centres offer a given sport (live sweep across all venues).
+
+    Accepts inputs from the query string OR a JSON body.
+    """
+    args = await _args(request)
+    sport = _require_str(args.get("sport"), "sport")
+    user_type = _clean_opt(args.get("user_type"))
+
+    sport_l = sport.lower()
+    ut_l = user_type.lower() if user_type else None
 
     centers = []
     for vid, summary in await _all_venue_sports():
