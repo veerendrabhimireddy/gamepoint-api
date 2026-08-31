@@ -403,6 +403,11 @@ def _rows_for(data: list, sport: str, user_type: str) -> list:
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
+@app.get("/version")
+async def version():
+    return {"build": "pricing-v2", "has_pricing": True}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
