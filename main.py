@@ -21,6 +21,7 @@ Endpoints exposed to the voice agent:
 """
 
 import asyncio
+import re
 import os
 from typing import Optional
 
@@ -156,6 +157,22 @@ async def _fetch_coaching(venue_id: int) -> dict:
 # --------------------------------------------------------------------------- #
 # Parsing helpers
 # --------------------------------------------------------------------------- #
+# Upstream stores batch times as decimals ("16.30" for half past four) and then
+# renders the fraction as minutes: 0.30 * 60 = 18. So :09/:18/:27 in
+# day_time_lines really mean :15/:30/:45. The row's `name` field carries the
+# correct time and was used to verify this mapping across all 13 venues.
+_MINUTE_FIX = {"09": "15", "18": "30", "27": "45"}
+
+
+def _fix_time_text(text: str) -> str:
+    """Correct upstream's decimal-minute artifact in any HH:MM inside text."""
+    def repl(match: "re.Match") -> str:
+        hh, mm = match.group(1), match.group(2)
+        return f"{hh}:{_MINUTE_FIX.get(mm, mm)}"
+
+    return re.sub(r"(\d{1,2}):(\d{2})", repl, str(text))
+
+
 def _line_start_hour(line: str) -> Optional[int]:
     """Start hour from a single line like 'Mon Wed Fri 16:00-17:00'."""
     for tok in str(line).split():
@@ -435,7 +452,7 @@ async def coaching_availability(request: Request):
             slots.append(
                 {
                     "days": " ".join(toks[:-1]),
-                    "time": toks[-1] if toks else "",
+                    "time": _fix_time_text(toks[-1]) if toks else "",
                     "start_hour": hour,
                     "days_per_week": sorted(
                         d for d in (row.get("days_per_week") or []) if d in (2, 3, 5, 6)
@@ -501,7 +518,7 @@ async def coaching_details(
                 g["timings"].append(
                     {
                         "days": " ".join(toks[:-1]),
-                        "time": toks[-1] if toks else "",
+                        "time": _fix_time_text(toks[-1]) if toks else "",
                         "start_hour": _line_start_hour(line),
                     }
                 )
@@ -592,8 +609,8 @@ async def coaching_timings(
             slots.append(
                 {
                     "days": " ".join(str(line).split()[:-1]),
-                    "time": str(line).split()[-1] if str(line).split() else "",
-                    "line": line,
+                    "time": _fix_time_text(str(line).split()[-1]) if str(line).split() else "",
+                    "line": _fix_time_text(line),
                     "start_hour": hour,
                 }
             )
