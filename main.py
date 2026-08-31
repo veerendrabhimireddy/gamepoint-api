@@ -26,12 +26,66 @@ from typing import Optional
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 app = FastAPI(
     title="GamePoint Voice-Agent API",
     version="1.0.0",
     description="Slices NetPlay's coaching/pricing data into small responses for the GamePoint voice agent.",
 )
+
+# --------------------------------------------------------------------------- #
+# Always answer 200
+# --------------------------------------------------------------------------- #
+# The voice platform discards the body of any non-2xx response and surfaces a
+# bare "HTTP request failed:" to the agent, so a 404 for "this centre doesn't
+# coach that sport" becomes an unreadable error. Return 200 with a structured,
+# speakable payload instead and let the agent read `message`.
+
+
+@app.exception_handler(HTTPException)
+async def _http_exception_as_200(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=200,
+        content={
+            "available": False,
+            "ok": False,
+            "message": exc.detail,
+            "slots": [],
+            "centers": [],
+        },
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_as_200(request: Request, exc: RequestValidationError):
+    fields = ", ".join(str(e.get("loc", ["?"])[-1]) for e in exc.errors())
+    return JSONResponse(
+        status_code=200,
+        content={
+            "available": False,
+            "ok": False,
+            "message": f"Missing or invalid input: {fields}.",
+            "slots": [],
+            "centers": [],
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_as_200(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=200,
+        content={
+            "available": False,
+            "ok": False,
+            "message": "That information isn't available right now. Offer a callback or transfer.",
+            "slots": [],
+            "centers": [],
+        },
+    )
+
 
 # --------------------------------------------------------------------------- #
 # Config
