@@ -173,6 +173,34 @@ def _fix_time_text(text: str) -> str:
     return re.sub(r"(\d{1,2}):(\d{2})", repl, str(text))
 
 
+def _to_12h(hhmm: str) -> str:
+    """'16:30' -> '4:30 PM', '06:00' -> '6:00 AM'."""
+    try:
+        hh, mm = str(hhmm).split(":")
+        h, m = int(hh), int(mm)
+    except (ValueError, AttributeError):
+        return str(hhmm)
+    suffix = "AM" if h < 12 else "PM"
+    h12 = h % 12
+    if h12 == 0:
+        h12 = 12
+    return f"{h12}:{m:02d} {suffix}"
+
+
+def _time_display(rng: str) -> str:
+    """'16:30-17:30' -> '4:30 PM - 5:30 PM'."""
+    parts = str(rng).split("-")
+    if len(parts) != 2:
+        return str(rng)
+    return f"{_to_12h(parts[0])} - {_to_12h(parts[1])}"
+
+
+def _period_of(hour: Optional[int]) -> Optional[str]:
+    if hour is None:
+        return None
+    return "morning" if hour < 12 else "evening"
+
+
 def _line_start_hour(line: str) -> Optional[int]:
     """Start hour from a single line like 'Mon Wed Fri 16:00-17:00'."""
     for tok in str(line).split():
@@ -453,6 +481,8 @@ async def coaching_availability(request: Request):
                 {
                     "days": " ".join(toks[:-1]),
                     "time": _fix_time_text(toks[-1]) if toks else "",
+                    "time_display": _time_display(_fix_time_text(toks[-1])) if toks else "",
+                    "period": _period_of(hour),
                     "start_hour": hour,
                     "days_per_week": sorted(
                         d for d in (row.get("days_per_week") or []) if d in (2, 3, 5, 6)
@@ -519,6 +549,7 @@ async def coaching_details(
                     {
                         "days": " ".join(toks[:-1]),
                         "time": _fix_time_text(toks[-1]) if toks else "",
+                        "time_display": _time_display(_fix_time_text(toks[-1])) if toks else "",
                         "start_hour": _line_start_hour(line),
                     }
                 )
@@ -610,6 +641,8 @@ async def coaching_timings(
                 {
                     "days": " ".join(str(line).split()[:-1]),
                     "time": _fix_time_text(str(line).split()[-1]) if str(line).split() else "",
+                    "time_display": _time_display(_fix_time_text(str(line).split()[-1])) if str(line).split() else "",
+                    "period": _period_of(hour),
                     "line": _fix_time_text(line),
                     "start_hour": hour,
                 }
