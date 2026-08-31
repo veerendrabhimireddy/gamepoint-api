@@ -26,6 +26,7 @@ import os
 from typing import Optional
 
 import httpx
+from pricing import get_pricing
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -454,10 +455,30 @@ async def coaching_availability(request: Request):
     payload = await _fetch_coaching(venue_id)
     rows = _rows_for(payload.get("data", []), sport, user_type)
     if not rows:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No {sport} coaching for {user_type} at venue {venue_id}",
-        )
+        # No published batches upstream. The client's fee table may still carry
+        # a price for this combination (e.g. Banjara Hills Cricket), so return
+        # it rather than erroring — the agent can quote the fee and transfer
+        # for timings.
+        priced = get_pricing(venue_id, sport, user_type)
+        return {
+            "venue_id": venue_id,
+            "venue_name": VENUES.get(venue_id),
+            "sport": sport,
+            "user_type": user_type,
+            "available": False,
+            "days_per_week": [],
+            "slots": [],
+            "pricing": priced,
+            "message": (
+                f"No published batch timings for {sport} ({user_type}) at "
+                f"{VENUES.get(venue_id)}. "
+                + (
+                    "Fees are available — quote them and offer a transfer to confirm timings."
+                    if priced.get("quotable")
+                    else "Offer a callback or transfer to the centre team."
+                )
+            ),
+        }
 
     dpw: set[int] = set()
     slots = []
@@ -500,6 +521,7 @@ async def coaching_availability(request: Request):
         "available": bool(slots),
         "days_per_week": sorted(dpw),
         "slots": slots,
+        "pricing": get_pricing(venue_id, sport, user_type),
         "message": None if slots else "No batches available for that combination. Not published — offer callback/transfer.",
     }
 
