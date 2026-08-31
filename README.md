@@ -81,3 +81,28 @@ Then open http://127.0.0.1:8000/docs for interactive testing.
 - Upstream `days_per_week` on a row lists the *frequencies its price supports*,
   which can differ from the batch's actual weekday pattern. Timings filter on
   this field to stay consistent with upstream.
+
+## Keeping the service awake
+
+Render's free tier sleeps the service after ~15 minutes idle. The first call
+after that takes 30-60s to wake — longer than the voice platform's 20s timeout,
+so the caller hears a failed lookup.
+
+`.github/workflows/keepalive.yml` pings `/health` every 10 minutes to prevent
+this. It also runs on demand from the Actions tab (`workflow_dispatch`).
+
+**Actions minutes caveat:** scheduled workflows consume GitHub Actions minutes
+on **private** repos. A 10-minute cadence is ~4,300 runs/month and each run
+bills a 1-minute minimum, which exceeds the 2,000 free minutes for private
+repos. Options:
+
+1. **Make the repo public** — Actions minutes are unlimited on public repos, so
+   the keep-alive is genuinely free. This repo holds no secrets: the NetPlay
+   token is read from the `NETPLAY_TOKEN` env var and is never committed.
+2. **Upgrade Render** to a paid instance (~$7/mo); the service never sleeps and
+   the keep-alive can be deleted.
+3. **Use an external pinger** (UptimeRobot, cron-job.org) pointed at
+   `/health`, and delete this workflow.
+
+GitHub also disables scheduled workflows on repos with no commits for 60 days;
+a manual run from the Actions tab re-enables them.
