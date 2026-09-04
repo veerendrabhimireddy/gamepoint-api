@@ -143,6 +143,75 @@ def _fmt(n) -> str:
     return f"{int(n):,}"
 
 
+PLAN_DAYS = 90  # three months, as upstream stores durations
+
+
+def pricing_for_top_frequency(
+    venue_id: int,
+    sport: str,
+    user_type: str,
+    rows: list,
+) -> dict:
+    """Fee for the highest weekly frequency this centre actually sells.
+
+    The frequency is read from the payload itself rather than a hardcoded list:
+    whatever three-month frequencies exist upstream, the largest one is the
+    plan quoted (5 where five days is sold, 3 where only three is, 6 at
+    Nizampet, and so on). Only that one figure is returned — never a range and
+    never an alternative plan.
+
+    Falls back to the client sheet when upstream carries no three-month price.
+    """
+    sport_key = str(sport).strip().lower()
+    ut = str(user_type).strip().lower()
+    vid = int(venue_id)
+
+    # collect three-month prices keyed by days-per-week
+    by_dpw: dict[int, float] = {}
+    for row in rows or []:
+        if str(row.get("sport", "")).lower() != sport_key:
+            continue
+        if ut not in [u.lower() for u in (row.get("user_types") or [])]:
+            continue
+        for plan in row.get("plans") or []:
+            for price in plan.get("prices") or []:
+                try:
+                    dur = int(price.get("duration"))
+                    days = int(price.get("days"))
+                    amt = float(price.get("price"))
+                except (TypeError, ValueError):
+                    continue
+                if dur != PLAN_DAYS or days not in (2, 3, 5, 6):
+                    continue
+                by_dpw[days] = amt
+
+    base = {
+        "duration": PLAN_DURATION,
+        "registration_fee_applies": vid in REGISTRATION_FEE_VENUES,
+    }
+
+    if by_dpw:
+        top = max(by_dpw)
+        amount = by_dpw[top]
+        return {
+            **base,
+            "days_per_week": top,
+            "plan": f"{PLAN_DURATION}, {_days_label(top)}",
+            "quotable": True,
+            "amount": int(amount),
+            "display": f"{_fmt(amount)} rupees",
+            "source": "live",
+            "note": f"This is the {PLAN_DURATION}, {_days_label(top)} fee — the "
+                    "only plan to quote. Do not mention other durations or "
+                    "frequencies.",
+        }
+
+    # Nothing upstream — fall back to the client sheet.
+    fallback = get_pricing(vid, sport, user_type)
+    fallback["source"] = "sheet"
+    return fallback
+
+
 def get_pricing(venue_id: int, sport: str, user_type: str) -> dict:
     """Return the client-approved fee for the ONE plan the agent may quote:
     three months at the centre's full weekly frequency (five days where sold).

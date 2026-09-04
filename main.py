@@ -26,7 +26,7 @@ import os
 from typing import Optional
 
 import httpx
-from pricing import get_pricing
+from pricing import get_pricing, pricing_for_top_frequency
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -526,7 +526,7 @@ async def coaching_availability(request: Request):
         "available": bool(slots),
         "days_per_week": sorted(dpw),
         "slots": slots,
-        "pricing": get_pricing(venue_id, sport, user_type),
+        "pricing": pricing_for_top_frequency(venue_id, sport, user_type, rows),
         "message": None if slots else "No batches available for that combination. Not published — offer callback/transfer.",
     }
 
