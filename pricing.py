@@ -90,26 +90,79 @@ PRICING = {
 }
 
 
+# The agent quotes ONE plan only: five days a week, three months. In the client
+# sheet a range runs from the 2-day fee up to the 5-day fee, so the range's max
+# IS the five-day price (verified against upstream 90-day prices for Hitec,
+# Uppal and Kompally).
+#
+# Some centre/sport combinations don't sell five days. For those the top
+# frequency below is what actually exists, and that is the plan quoted instead.
+# Values marked (api) were confirmed against upstream 90-day prices; those
+# marked (sec20) come from the prompt's days-per-week constraints and should be
+# confirmed with the client.
+DEFAULT_DAYS_PER_WEEK = 5
+
+# Centre/sport combinations that do not sell five days a week — quoted as three
+# days instead. Confirmed against upstream 90-day prices unless marked (sec20),
+# which comes from the prompt's days-per-week constraints.
+THREE_DAY_ONLY = {
+    ("badminton", 17),      # Nizampet: 3 or 6 only
+    ("basketball", 17),     # Nizampet
+    ("football", 17),       # Nizampet
+    ("table tennis", 8),    # 100 Feet Road: 3 only
+    ("taekwondo", 8),       # 100 Feet Road
+    ("taekwondo", 28),      # KPHB
+    ("taekwondo", 30),      # Kompally
+    ("taekwondo", 24),      # Bandlaguda (sec20)
+    ("taekwondo", 31),      # Manthan Road (sec20)
+    ("pickleball", 14),     # Banjara Hills: 3 only (sec20)
+    ("table tennis", 14),   # Banjara Hills (sec20)
+    ("badminton", 8),       # 100 Feet Road: 5-day is priced upstream but only
+                            # Mon/Wed/Fri batches run, so 3 days is what sells
+}
+
+# Where the sheet publishes a RANGE, the three-day fee sits inside it and cannot
+# be derived from the endpoints — sometimes it is the min, sometimes the max.
+# These are the actual upstream 90-day three-day prices for the range-based
+# combinations above. Client should confirm these figures.
+THREE_DAY_AMOUNT = {
+    ("badminton", 8, "child"): 16000,    # sheet range 12,500-20,000 (2d/5d)
+    ("badminton", 17, "child"): 11000,   # sheet range 9,000-11,000
+    ("badminton", 17, "adult"): 12000,   # sheet range 12,000-15,500
+    ("basketball", 17, "child"): 9000,   # sheet range 9,000-11,000
+    ("football", 17, "child"): 9000,     # sheet range 9,000-11,000
+}
+
+
+def _days_label(n: int) -> str:
+    return f"{n} days a week"
+
+
 def _fmt(n) -> str:
     """12500 -> '12,500' (Indian grouping is not needed at these magnitudes)."""
     return f"{int(n):,}"
 
 
 def get_pricing(venue_id: int, sport: str, user_type: str) -> dict:
-    """Return the client-approved fee block for a centre + sport + age group.
+    """Return the client-approved fee for the ONE plan the agent may quote:
+    three months at the centre's full weekly frequency (five days where sold).
 
-    Always returns a dict the agent can read directly; `quotable` says whether
-    a figure may be spoken at all.
+    Never returns a range or alternative plans — `display` is a single figure.
     """
     sport_key = str(sport).strip().lower()
     ut = str(user_type).strip().lower()
+    vid = int(venue_id)
 
     by_venue = PRICING.get(sport_key)
-    entry = (by_venue or {}).get(int(venue_id))
+    entry = (by_venue or {}).get(vid)
     value = (entry or {}).get(ut) if entry else None
+
+    dpw = 3 if (sport_key, vid) in THREE_DAY_ONLY else DEFAULT_DAYS_PER_WEEK
 
     base = {
         "duration": PLAN_DURATION,
+        "days_per_week": dpw,
+        "plan": f"{PLAN_DURATION}, {_days_label(dpw)}",
         "registration_fee_applies": int(venue_id) in REGISTRATION_FEE_VENUES,
     }
 
@@ -122,21 +175,31 @@ def get_pricing(venue_id: int, sport: str, user_type: str) -> dict:
                     "estimate — offer a callback or transfer to the centre team.",
         }
 
+    # A single figure is published — that is the plan, at whatever frequency
+    # the centre sells.
     if "exact" in value:
-        return {**base, "quotable": True, "amount": value["exact"],
-                "display": f"{_fmt(value['exact'])} rupees"}
+        amount = value["exact"]
 
-    if "from" in value:
-        return {**base, "quotable": True, "amount_from": value["from"],
-                "display": f"starting from {_fmt(value['from'])} rupees"}
+    # "from X": X is the only published figure; where a single frequency is
+    # sold it is that frequency's fee.
+    elif "from" in value:
+        amount = value["from"]
 
-    lo, hi = value["min"], value["max"]
+    # Three-day centre with a published range: the three-day fee sits inside
+    # the range, so take it from the explicit table.
+    elif dpw == 3 and (sport_key, vid, ut) in THREE_DAY_AMOUNT:
+        amount = THREE_DAY_AMOUNT[(sport_key, vid, ut)]
+
+    # Five-day centre with a range: the range runs up to the five-day fee, so
+    # the max is the figure to quote.
+    else:
+        amount = value["max"]
+
     return {
         **base,
         "quotable": True,
-        "min": lo,
-        "max": hi,
-        "display": f"{_fmt(lo)} to {_fmt(hi)} rupees",
-        "note": "Quote the full range unless days-per-week is confirmed; then "
-                "guide within it (fewer days -> lower end, five days -> upper end).",
+        "amount": amount,
+        "display": f"{_fmt(amount)} rupees",
+        "note": f"This is the {PLAN_DURATION}, {_days_label(dpw)} fee — the only "
+                "plan to quote. Do not mention other durations or frequencies.",
     }
